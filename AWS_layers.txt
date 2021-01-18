@@ -1,0 +1,2 @@
+1	SeleniumChromiumLayer	1	arn:aws:lambda:eu-west-3:401294591074:layer:SeleniumChromiumLayer:1
+2	Klayers-python37-requests	14	arn:aws:lambda:eu-west-3:113088814899:layer:Klayers-python37-requests:14
