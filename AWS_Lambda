@@ -1,0 +1,185 @@
+import os
+import shutil
+import uuid
+import logging
+
+import boto3
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as ec
+
+import datetime
+import re
+import requests
+
+tmp_folder = '/tmp/{}'.format(uuid.uuid4())
+
+if not os.path.exists(tmp_folder):
+    os.makedirs(tmp_folder)
+if not os.path.exists(tmp_folder + '/user-data'):
+    os.makedirs(tmp_folder + '/user-data')
+if not os.path.exists(tmp_folder + '/data-path'):
+    os.makedirs(tmp_folder + '/data-path')
+if not os.path.exists(tmp_folder + '/cache-dir'):
+    os.makedirs(tmp_folder + '/cache-dir')
+
+
+chrome_options = webdriver.ChromeOptions()
+lambda_options = [
+    '--autoplay-policy=user-gesture-required',
+    '--disable-background-networking',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-breakpad',
+    '--disable-client-side-phishing-detection',
+    '--disable-component-update',
+    '--disable-default-apps',
+    '--disable-dev-shm-usage',
+    '--disable-domain-reliability',
+    '--disable-extensions',
+    '--disable-features=AudioServiceOutOfProcess',
+    '--disable-hang-monitor',
+    '--disable-ipc-flooding-protection',
+    '--disable-notifications',
+    '--disable-offer-store-unmasked-wallet-cards',
+    '--disable-popup-blocking',
+    '--disable-print-preview',
+    '--disable-prompt-on-repost',
+    '--disable-renderer-backgrounding',
+    '--disable-setuid-sandbox',
+    '--disable-speech-api',
+    '--disable-sync',
+    '--disk-cache-size=33554432',
+    '--hide-scrollbars',
+    '--ignore-gpu-blacklist',
+    '--ignore-certificate-errors',
+    '--metrics-recording-only',
+    '--mute-audio',
+    '--no-default-browser-check',
+    '--no-first-run',
+    '--no-pings',
+    '--no-sandbox',
+    '--no-zygote',
+    '--password-store=basic',
+    '--use-gl=swiftshader',
+    '--use-mock-keychain',
+    '--single-process',
+    '--headless',
+    '--window-size=1024,1920']
+
+
+for argument in lambda_options:
+    chrome_options.add_argument(argument)          
+chrome_options.add_argument('--user-data-dir={}'.format(tmp_folder + '/user-data'))
+chrome_options.add_argument('--data-path={}'.format(tmp_folder + '/data-path'))
+chrome_options.add_argument('--homedir={}'.format(tmp_folder))
+chrome_options.add_argument('--disk-cache-dir={}'.format(tmp_folder + '/cache-dir'))
+
+chrome_options.binary_location = "/opt/bin/chromium" 
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+driver = webdriver.Chrome(chrome_options=chrome_options)
+
+
+def lambda_handler(event, context):
+    
+    # Info about the session
+    logger.info('## ENVIRONMENT VARIABLES')
+    logger.info(os.environ['URL'])
+    logger.info(os.environ['BUCKET'])
+    logger.info('Using Chromium version: {}'.format(driver.capabilities['browserVersion']))
+    
+    driver.get(os.environ['URL'])
+    #test page
+    #driver.get('https://www.seine-saint-denis.gouv.fr/booking/create/9845')
+    
+    # Waiting for the page was loaded
+    WebDriverWait(driver, 45).until(ec.presence_of_element_located((By.XPATH, '//h1')))
+    h1 = driver.find_element_by_xpath('//h1').text
+
+    #Accept cookies 
+    try:
+        cookies_appears = driver.find_element_by_xpath("//a[text()='Accepter']").is_displayed()
+        if cookies_appears:
+            driver.find_element_by_xpath("//a[text()='Accepter']").click()
+            WebDriverWait(driver, 5).until(ec.invisibility_of_element((By.ID, 'cookies-banner')))
+            logger.info('Accept cookies')
+    except Exception:
+        pass
+        
+    # Confirm conditions and push next page    
+    driver.find_element_by_id('condition').click()
+    driver.find_element_by_name('nextButton').click()
+    WebDriverWait(driver, 20).until(ec.url_changes)    
+    logger.info('Press conditions and next')
+    
+    # Cheking if the time free slot is exists
+    text = driver.find_element_by_xpath('//*[@id="FormBookingCreate"]').text
+    no_free_slot = (re.search("Il n'existe plus de plage horaire libre pour votre demande de rendez-vous.", text))
+    
+    # Get date and time for the output file name    
+    current_date_time = datetime.datetime.now().strftime('%Y%m%d%H%M%S')    
+
+    # If free slot does not exist return False
+    if no_free_slot:
+    
+        #driver.save_screenshot('/tmp/{}.png'.format(current_date_time))
+        logger.info('No slot')
+        answer = False
+    
+    # If free slot exists    
+    else:
+        
+        #test radio choice
+        #driver.find_element_by_id('planning16967').click()
+
+        # First page confirm
+        driver.find_element_by_name('nextButton').click()
+        WebDriverWait(driver, 20).until(ec.url_changes)  
+        
+        # Second page confirm
+        driver.find_element_by_name('nextButton').click()
+        WebDriverWait(driver, 20).until(ec.presence_of_element_located((By.XPATH, '//*[@id="planning_Booking"]/table')))
+
+        # Make screenshot of the third page with the booking table
+        driver.save_screenshot('/tmp/{}.png'.format(current_date_time))
+        logger.info('Free slot, Generate screenshot, sent the timetable to Telegram')
+        
+        # It free slot exists return True
+        answer = True
+
+        def send_message(message):
+            requests.get('https://api.telegram.org/bot{}/sendMessage'.format(api_token),
+                        params={'chat_id': 'CHAT_ID', 
+                            'parse_mode': 'Markdown',
+                            'text': message}
+                        )
+                
+        def send_screenshot(photo):
+            requests.post('https://api.telegram.org/bot{}/sendPhoto'.format(api_token),
+                        data={'chat_id': 'CHAT_ID'}, 
+                        files={'photo': open(photo, 'rb')}
+                        )
+
+        api_token = 'API_TOKEN'
+
+        send_screenshot('/tmp/{}.png'.format(current_date_time))
+
+        message = "*Mon chef*,\nADMISSION EXCEPTIONNELLE AU SÉJOUR - ARRONDISSEMENT DE {}\n[Cliquez pour passer au formulaire]({})".format(os.environ['ARNDSMNT'], os.environ['URL'])
+        send_message(message)
+         
+        s3 = boto3.client('s3')
+        # Upload generated screenshot file to S3 bucket.
+        s3.upload_file('/tmp/{}.png'.format(current_date_time), 
+                    os.environ['BUCKET'], 
+                    '{}.png'.format(current_date_time)
+                    )
+
+    # Remove specific tmp dir of this "run"
+    shutil.rmtree(tmp_folder)
+    
+    return answer
